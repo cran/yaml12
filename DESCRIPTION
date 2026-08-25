@@ -1,6 +1,6 @@
 Package: yaml12
 Title: Fast 'YAML' 1.2 Parser and Formatter
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: c(
     person("Tomasz", "Kalinowski", , "tomasz@posit.co", role = c("aut", "cre")),
     person("Posit Software, PBC", role = c("cph", "fnd"),
@@ -22,19 +22,21 @@ BugReports: https://github.com/posit-dev/r-yaml12/issues
 Depends: R (>= 4.2)
 Suggests: jsonlite, knitr, rmarkdown, testthat (>= 3.0.0), waldo, withr
 VignetteBuilder: knitr
-Config/Needs/website: tidyverse/tidytemplate
-Config/rextendr/version: 0.4.2.9000
+Config/Needs/website: tidyverse/tidytemplate, rmarkdown, bench,
+        ggplot2, ggbeeswarm, dplyr, tidyr, yaml
 Config/testthat/edition: 3
 Config/testthat/parallel: false
 Encoding: UTF-8
-RoxygenNote: 7.3.3
-SystemRequirements: Cargo (Rust's package manager), rustc >= 1.70.0, xz
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.71.0,
+        xz. On Windows ARM64, source installs also require Microsoft
+        C++ Build Tools with ARM64 components.
+Config/roxygen2/version: 8.1.0
 NeedsCompilation: yes
-Packaged: 2025-12-03 19:56:58 UTC; tomasz
+Packaged: 2026-08-24 22:19:49 UTC; tomasz
 Author: Tomasz Kalinowski [aut, cre],
   Posit Software, PBC [cph, fnd] (ROR: <https://ror.org/03wc8by49>),
   Authors of the dependency Rust crates [cph] (See inst/AUTHORS and
     LICENSE.note for vendored Rust dependency authors and licenses.)
 Maintainer: Tomasz Kalinowski <tomasz@posit.co>
 Repository: CRAN
-Date/Publication: 2025-12-11 15:50:02 UTC
+Date/Publication: 2026-08-25 07:00:03 UTC

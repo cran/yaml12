@@ -81,15 +81,17 @@ if (!nzchar(rsync)) {
 }
 
 # Preserve symlinks and delete stale entries; trailing slash copies contents.
-run(rsync, c("-a", "--delete", file.path(clone_dir, "data"), dest_dir))
+run(
+  rsync,
+  c("-a", "--delete", "--exclude=.git", file.path(clone_dir, "data"), dest_dir)
+)
 
-# Remove symlinks--keep only the actual target directories with data.
-all_dirs <- list.dirs(dest_data, recursive = TRUE, full.names = TRUE)
-real_dirs <- unique(normalizePath(all_dirs))
-symlink_dirs <- setdiff(all_dirs, real_dirs)
-if (length(symlink_dirs)) {
-  unlink(symlink_dirs, recursive = TRUE, force = TRUE)
-}
+# Remove the upstream symlink indexes; tests use the canonical case directories.
+unlink(
+  file.path(dest_data, c("name", "tags")),
+  recursive = TRUE,
+  force = TRUE
+)
 
 if (file.exists(license_src)) {
   file.copy(license_src, file.path(dest_dir, "License"), overwrite = TRUE)

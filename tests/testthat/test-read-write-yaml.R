@@ -10,9 +10,7 @@ test_that("write_yaml writes and read_yaml reads single documents", {
   expect_true(file.exists(path))
   file_lines <- readLines(path)
   body_lines <- strsplit(encoded, "\n", fixed = TRUE)[[1]]
-  expect_identical(file_lines[[1]], "---")
-  expect_identical(file_lines[[length(file_lines)]], "...")
-  expect_identical(file_lines[seq_along(body_lines) + 1L], body_lines)
+  expect_identical(file_lines, c("---", body_lines))
   expect_identical(read_yaml(path), value)
   expect_identical(read_yaml(path, simplify = TRUE), value)
   expect_identical(
@@ -20,6 +18,46 @@ test_that("write_yaml writes and read_yaml reads single documents", {
     list(alpha = 1L, nested = list(TRUE, NULL))
   )
   expect_identical(parse_yaml(encoded), value)
+})
+
+test_that("write_yaml appends YAML documents", {
+  path <- tempfile("yaml12-", fileext = ".yaml")
+  on.exit(unlink(path), add = TRUE)
+
+  first <- list(first = 1L)
+  second <- list(second = 2L)
+  docs <- list(list(third = 3L), list(fourth = 4L))
+
+  expect_identical(write_yaml(first, path, append = TRUE), first)
+  write_yaml(second, path, FALSE, TRUE)
+  write_yaml(docs, path, multi = TRUE, append = TRUE)
+
+  expect_false(any(readLines(path) == "..."))
+  expect_identical(
+    read_yaml(path, multi = TRUE),
+    c(list(first, second), docs)
+  )
+
+  replacement <- list(list(replacement = 5L))
+  write_yaml(replacement, path, multi = TRUE)
+  expect_identical(read_yaml(path, multi = TRUE), replacement)
+})
+
+test_that("read_yaml and write_yaml translate marked path strings", {
+  path <- rawToChar(c(
+    charToRaw(withr::local_tempdir()),
+    charToRaw("/yaml12-"),
+    as.raw(0xe9),
+    charToRaw(".yaml")
+  ))
+  Encoding(path) <- "latin1"
+
+  writeLines("value: 1", path)
+  expect_true(file.exists(path))
+  expect_identical(read_yaml(path), list(value = 1L))
+
+  expect_identical(write_yaml(list(value = 2L), path), list(value = 2L))
+  expect_identical(read_yaml(path), list(value = 2L))
 })
 
 test_that("write_yaml defaults to R stdout when path is NULL", {
@@ -32,8 +70,7 @@ test_that("write_yaml defaults to R stdout when path is NULL", {
   )
   expect_identical(out, value)
   expect_true(startsWith(output, "---\n"))
-  expect_true(endsWith(output, "\n..."))
-  expect_identical(output, paste0("---\n", encoded, "\n..."))
+  expect_identical(output, paste0("---\n", encoded))
   expect_identical(parse_yaml(output), value)
 })
 
@@ -54,7 +91,6 @@ test_that("write_yaml and read_yaml handle multi-document streams", {
   if (identical(expected_lines[[length(expected_lines)]], "")) {
     expected_lines <- expected_lines[-length(expected_lines)]
   }
-  expected_lines <- c(expected_lines, "...")
   expect_identical(file_lines, expected_lines)
 
   expect_identical(
@@ -108,7 +144,7 @@ test_that("write_yaml emits empty multi-document streams", {
   docs <- list()
 
   expect_identical(write_yaml(docs, path, multi = TRUE), docs)
-  expect_identical(readChar(path, file.info(path)$size), "---\n...\n")
+  expect_identical(readChar(path, file.info(path)$size), "---\n")
 
   expect_identical(read_yaml(path, multi = TRUE), list(NULL))
   expect_identical(read_yaml(path, multi = TRUE, simplify = TRUE), list(NULL))
@@ -117,7 +153,7 @@ test_that("write_yaml emits empty multi-document streams", {
     capture.output(write_yaml(docs, multi = TRUE)),
     collapse = "\n"
   )
-  expect_identical(output, "---\n...")
+  expect_identical(output, "---")
 })
 
 test_that("write_yaml flushes a final newline for files", {
@@ -191,6 +227,47 @@ test_that("write_yaml snapshot aids emitter regressions", {
   write_yaml(multilines, path)
   expect_identical(read_yaml(path), multilines)
   expect_snapshot(readChar(path, file.info(path)$size))
+})
+
+test_that("read_yaml and write_yaml expand `~` in paths", {
+  name <- basename(tempfile("yaml12-missing-", fileext = ".yaml"))
+  tilde_path <- file.path("~", name)
+
+  err <- expect_error(read_yaml(tilde_path), "Failed to read")
+  expect_match(conditionMessage(err), path.expand(tilde_path), fixed = TRUE)
+
+  tilde_write_path <- file.path("~", name, "nested.yaml")
+  err <- expect_error(
+    write_yaml(list(a = 1L), tilde_write_path),
+    "Failed to write"
+  )
+  expect_match(
+    conditionMessage(err),
+    path.expand(tilde_write_path),
+    fixed = TRUE
+  )
+})
+
+test_that("tilde paths round-trip through a redirected HOME", {
+  skip_on_os("windows")
+  home <- withr::local_tempdir("yaml12-home-")
+  withr::local_envvar(HOME = home)
+
+  value <- list(alpha = 1L, beta = "two")
+  write_yaml(value, "~/test.yaml")
+  expect_true(file.exists(file.path(home, "test.yaml")))
+  expect_identical(read_yaml("~/test.yaml"), value)
+})
+
+test_that("tilde expansion handles marked path encodings", {
+  skip_if(!l10n_info()[["UTF-8"]])
+  missing <- paste0("yaml12-missing-caf\u00e9-", basename(tempfile()))
+  latin1_path <- iconv(file.path("~", missing), from = "UTF-8", to = "latin1")
+  skip_if(is.na(latin1_path))
+  expect_identical(Encoding(latin1_path), "latin1")
+
+  err <- expect_error(read_yaml(latin1_path), "Failed to read")
+  expect_match(conditionMessage(err), path.expand(latin1_path), fixed = TRUE)
 })
 
 test_that("read_yaml errors clearly when the file cannot be read", {

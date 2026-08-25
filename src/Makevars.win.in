@@ -1,4 +1,4 @@
-TARGET = $(subst 64,x86_64,$(subst 32,i686,$(WIN)))-pc-windows-gnu
+TARGET = $(shell "$(R_HOME)/bin$(R_ARCH_BIN)/Rscript.exe" "../tools/windows-rust-target.R")
 
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/$(TARGET)/@LIBDIR@
@@ -13,6 +13,7 @@ $(SHLIB): $(STATLIB)
 
 CARGOTMP = $(CURDIR)/.cargo
 VENDOR_DIR = vendor
+VENDOR_METADATA = ._vendor
 
 $(STATLIB):
 	mkdir -p $(TARGET_DIR)/libgcc_mock
@@ -40,7 +41,7 @@ $(STATLIB):
 	rm -Rf $(CARGOTMP);
 
 rust_clean: $(SHLIB)
-	rm -Rf $(CARGOTMP) $(VENDOR_DIR) @CLEAN_TARGET@
+	rm -Rf $(CARGOTMP) $(VENDOR_DIR) $(VENDOR_METADATA) @CLEAN_TARGET@
 
 clean:
-	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) $(VENDOR_DIR)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) $(TARGET_DIR) $(VENDOR_DIR) $(VENDOR_METADATA)

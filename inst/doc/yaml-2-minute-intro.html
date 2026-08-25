@@ -481,7 +481,9 @@ bool, or null.</p>
 <p>YAML 1.2 uses simple rules to then infer the type of a plain
 node:</p>
 <ul>
-<li><code>true</code> / <code>false</code> → <code>TRUE</code> /
+<li><code>true</code> / <code>false</code> and their
+<code>True</code>/<code>TRUE</code> and
+<code>False</code>/<code>FALSE</code> variants → <code>TRUE</code> /
 <code>FALSE</code></li>
 <li><code>null</code>, <code>~</code>, or empty → <code>NULL</code></li>
 <li>numbers: signed, decimal, scientific, hex (<code>0x</code>), octal
@@ -531,6 +533,112 @@ become the appropriate <code>NA_*</code> values.</p>
 <span id="cb18-12"><a href="#cb18-12" tabindex="-1"></a>  )</span>
 <span id="cb18-13"><a href="#cb18-13" tabindex="-1"></a>)</span></code></pre></div>
 </div>
+<div id="why-yaml-12" class="section level2">
+<h2>Why YAML 1.2?</h2>
+<p>For most R users, the main visible difference between YAML 1.1 and
+1.2 is how plain (unquoted) scalars get their types. YAML 1.2’s
+recommended core schema recognizes fewer special spellings, so ordinary
+words such as <code>yes</code> and <code>on</code> stay strings. R’s <a href="https://yaml.r-lib.org/"><code>yaml</code></a> package implements
+a YAML 1.1 parser and emitter, while <code>yaml12</code> implements YAML
+1.2.2.</p>
+<div id="yaml-1.1-versus-1.2-quick-reference" class="section level3">
+<h3>YAML 1.1 versus 1.2 quick reference</h3>
+<p>The YAML 1.1 column below follows its type library. The YAML 1.2
+column follows the recommended core schema. Individual parsers may
+support a subset of these rules or offer other schemas.</p>
+<table>
+<thead>
+<tr class="header">
+<th>Plain YAML or feature</th>
+<th>YAML 1.1 type library</th>
+<th>YAML 1.2 core schema</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>yes</code>, <code>no</code>, <code>on</code>,
+<code>off</code>, <code>y</code>, <code>n</code></td>
+<td>Boolean</td>
+<td>String</td>
+</tr>
+<tr class="even">
+<td><code>true</code>, <code>True</code>, <code>TRUE</code> (and false
+variants)</td>
+<td>Boolean</td>
+<td>Boolean</td>
+</tr>
+<tr class="odd">
+<td><code>010</code></td>
+<td>Octal integer <code>8</code></td>
+<td>Decimal integer <code>10</code></td>
+</tr>
+<tr class="even">
+<td><code>0o10</code></td>
+<td>String</td>
+<td>Octal integer <code>8</code></td>
+</tr>
+<tr class="odd">
+<td><code>0b10</code></td>
+<td>Binary integer <code>2</code></td>
+<td>String</td>
+</tr>
+<tr class="even">
+<td><code>1:20</code></td>
+<td>Sexagesimal integer <code>80</code></td>
+<td>String</td>
+</tr>
+<tr class="odd">
+<td><code>1_000</code></td>
+<td>Decimal integer <code>1000</code></td>
+<td>String</td>
+</tr>
+<tr class="even">
+<td><code>2026-01-07</code></td>
+<td>Timestamp</td>
+<td>String</td>
+</tr>
+<tr class="odd">
+<td><code>&lt;&lt;</code> mapping key</td>
+<td>Merge mappings</td>
+<td>Ordinary string key</td>
+</tr>
+</tbody>
+</table>
+<p>YAML 1.2 also dropped <code>!!pairs</code>, <code>!!omap</code>,
+<code>!!set</code>, <code>!!timestamp</code>, and <code>!!binary</code>
+from its core type set. Those explicit tags remain valid YAML syntax,
+but YAML 1.2 no longer assigns them core meanings. <code>yaml12</code>
+preserves them as unhandled tags, and handlers let application code opt
+into their meaning. The <a href="https://posit-dev.github.io/r-yaml12/articles/yaml-tags-and-advanced-features.html#core-schema-tags">advanced
+YAML article</a> shows how this works.</p>
+<p>These changes make YAML 1.2 more conservative, not string-only. Plain
+<code>true</code>, <code>null</code>, and numeric forms still get typed
+values. For example, <code>10.23</code> is a number in both versions;
+quote it if it must remain a string.</p>
+<p>Here is how <code>yaml12</code> resolves a few values that differ
+from YAML 1.1:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb19-1"><a href="#cb19-1" tabindex="-1"></a>yaml_1_2 <span class="ot">&lt;-</span> <span class="st">&quot;</span></span>
+<span id="cb19-2"><a href="#cb19-2" tabindex="-1"></a><span class="st">country: NO</span></span>
+<span id="cb19-3"><a href="#cb19-3" tabindex="-1"></a><span class="st">enabled: on</span></span>
+<span id="cb19-4"><a href="#cb19-4" tabindex="-1"></a><span class="st">port: 22:22</span></span>
+<span id="cb19-5"><a href="#cb19-5" tabindex="-1"></a><span class="st">leading_zero: 010</span></span>
+<span id="cb19-6"><a href="#cb19-6" tabindex="-1"></a><span class="st">octal: 0o10</span></span>
+<span id="cb19-7"><a href="#cb19-7" tabindex="-1"></a><span class="st">release_date: 2026-01-07</span></span>
+<span id="cb19-8"><a href="#cb19-8" tabindex="-1"></a><span class="st">&quot;</span></span>
+<span id="cb19-9"><a href="#cb19-9" tabindex="-1"></a></span>
+<span id="cb19-10"><a href="#cb19-10" tabindex="-1"></a><span class="fu">str</span>(<span class="fu">parse_yaml</span>(yaml_1_2))</span>
+<span id="cb19-11"><a href="#cb19-11" tabindex="-1"></a><span class="co">#&gt; List of 6</span></span>
+<span id="cb19-12"><a href="#cb19-12" tabindex="-1"></a><span class="co">#&gt;  $ country     : chr &quot;NO&quot;</span></span>
+<span id="cb19-13"><a href="#cb19-13" tabindex="-1"></a><span class="co">#&gt;  $ enabled     : chr &quot;on&quot;</span></span>
+<span id="cb19-14"><a href="#cb19-14" tabindex="-1"></a><span class="co">#&gt;  $ port        : chr &quot;22:22&quot;</span></span>
+<span id="cb19-15"><a href="#cb19-15" tabindex="-1"></a><span class="co">#&gt;  $ leading_zero: int 10</span></span>
+<span id="cb19-16"><a href="#cb19-16" tabindex="-1"></a><span class="co">#&gt;  $ octal       : int 8</span></span>
+<span id="cb19-17"><a href="#cb19-17" tabindex="-1"></a><span class="co">#&gt;  $ release_date: chr &quot;2026-01-07&quot;</span></span></code></pre></div>
+<p>See the <a href="https://yaml.org/spec/1.2.2/ext/changes/">YAML 1.2
+changes</a> for the full specification-level list and the <a href="https://tidyverse.org/blog/2026/01/yaml12-0-1-0/#why-yaml-12"><code>yaml12</code>
+release post</a> for more background.</p>
+</div>
+</div>
 <div id="quick-notes" class="section level2">
 <h2>Quick notes</h2>
 <ul>
@@ -542,7 +650,9 @@ spaces.</p></li>
 <code>simplify = FALSE</code>.</p></li>
 <li><p>Block scalars (<code>|</code>, <code>&gt;</code>) always produce
 strings.</p></li>
-<li><p>Booleans are only <code>true</code>/<code>false</code>;</p></li>
+<li><p>Boolean words are <code>true</code>/<code>false</code> and their
+<code>True</code>/<code>TRUE</code> and
+<code>False</code>/<code>FALSE</code> variants.</p></li>
 <li><p><code>null</code> maps to <code>NULL</code> (or <code>NA</code>
 inside simplified vectors).</p></li>
 </ul>

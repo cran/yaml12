@@ -1,14 +1,20 @@
 use crate::handlers::HandlerRegistry;
-use crate::timestamp::{is_timestamp_tag, parse_timestamp_node, simplify_timestamp_sequence};
-use crate::unwind::EvalError;
+use crate::r_ext::{self, PreservedSexp};
 use crate::warning::emit_warning;
-use crate::{api_other, sym_yaml_keys, sym_yaml_tag, Fallible, TIMESTAMP_SUPPORT_ENABLED};
-use extendr_api::prelude::*;
+use crate::{api_other, Fallible};
 use saphyr::{Mapping, Scalar, Tag, Yaml, YamlLoader};
 use saphyr_parser::{Parser, ScalarStyle};
-use std::{borrow::Cow, fs, mem};
+use savvy::{
+    NotAvailableValue, OwnedIntegerSexp, OwnedListSexp, OwnedLogicalSexp, OwnedRealSexp, Sexp,
+    StringSexp,
+};
+use savvy_ffi as ffi;
+use std::{
+    fs,
+    mem::{self, MaybeUninit},
+};
 
-fn resolve_representation(node: &mut Yaml, _simplify: bool) {
+fn resolve_representation(node: &mut Yaml) {
     let (value, style, tag) = match mem::replace(node, Yaml::BadValue) {
         Yaml::Representation(value, style, tag) => (value, style, tag),
         other => {
@@ -20,42 +26,19 @@ fn resolve_representation(node: &mut Yaml, _simplify: bool) {
     let is_plain_empty = style == ScalarStyle::Plain && value.trim().is_empty();
 
     let parsed = match tag {
-        Some(tag) => {
-            if tag.is_yaml_core_schema() {
-                match tag.suffix.as_str() {
-                    "str" => Yaml::value_from_cow_and_metadata(value, style, Some(&tag)),
-                    "null" => {
-                        if is_plain_empty {
-                            Yaml::Value(Scalar::Null)
-                        } else {
-                            Yaml::value_from_cow_and_metadata(value, style, Some(&tag))
-                        }
-                    }
-                    // _ if is_timestamp_tag(tag.as_ref()) => {
-                    //     Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value))))
-                    // }
-                    "binary" | "set" | "omap" | "pairs" | "timestamp" => {
-                        Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value))))
-                    }
-                    _ => {
-                        let parsed =
-                            Yaml::value_from_cow_and_metadata(value.clone(), style, Some(&tag));
-                        if matches!(parsed, Yaml::BadValue)
-                            && !matches!(
-                                tag.suffix.as_str(),
-                                "bool" | "int" | "float" | "null" | "str"
-                            )
-                        {
-                            Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value))))
-                        } else {
-                            parsed
-                        }
-                    }
+        Some(tag) if tag.is_yaml_core_schema() => match tag.suffix.as_str() {
+            "str" => Yaml::value_from_cow_and_metadata(value, style, Some(&tag)),
+            "null" => {
+                if is_plain_empty {
+                    Yaml::Value(Scalar::Null)
+                } else {
+                    Yaml::value_from_cow_and_metadata(value, style, Some(&tag))
                 }
-            } else {
-                Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value))))
             }
-        }
+            "bool" | "int" | "float" => Yaml::value_from_cow_and_metadata(value, style, Some(&tag)),
+            _ => Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value)))),
+        },
+        Some(tag) => Yaml::Tagged(tag, Box::new(Yaml::Value(Scalar::String(value)))),
         None if is_plain_empty => Yaml::Value(Scalar::Null),
         None => Yaml::value_from_cow_and_metadata(value, style, None),
     };
@@ -67,9 +50,9 @@ fn yaml_to_robj(
     node: &mut Yaml,
     simplify: bool,
     handlers: Option<&HandlerRegistry<'_>>,
-) -> Fallible<Robj> {
+) -> Fallible<Sexp> {
     match node {
-        Yaml::Value(scalar) => Ok(scalar_to_robj(scalar)),
+        Yaml::Value(scalar) => scalar_to_robj(scalar),
         Yaml::Tagged(tag, inner) => convert_tagged(tag, inner.as_mut(), simplify, handlers),
         Yaml::Sequence(seq) => sequence_to_robj(seq, simplify, handlers),
         Yaml::Mapping(map) => mapping_to_robj(map, simplify, handlers),
@@ -78,33 +61,100 @@ fn yaml_to_robj(
         )),
         Yaml::BadValue => Err(api_other("Encountered an invalid YAML scalar value")),
         Yaml::Representation(_, _, _) => {
-            resolve_representation(node, simplify);
+            resolve_representation(node);
             yaml_to_robj(node, simplify, handlers)
         }
     }
 }
 
-fn scalar_to_robj(scalar: &Scalar) -> Robj {
+fn scalar_to_robj(scalar: &Scalar) -> Fallible<Sexp> {
     match scalar {
-        Scalar::Null => NULL.into(),
-        Scalar::Boolean(value) => r!(*value),
+        Scalar::Null => Ok(r_ext::null()),
+        Scalar::Boolean(value) => r_ext::logical_scalar(*value),
         Scalar::Integer(value) => {
             if let Ok(v) = i32::try_from(*value) {
-                r!(v)
+                r_ext::integer_scalar(v)
             } else {
-                r!(*value as f64)
+                r_ext::real_scalar(*value as f64)
             }
         }
-        Scalar::FloatingPoint(value) => r!(value.into_inner()),
-        Scalar::String(value) => r!(value.as_ref()),
+        Scalar::FloatingPoint(value) => r_ext::real_scalar(value.into_inner()),
+        Scalar::String(value) => r_ext::string_scalar(value.as_ref()),
     }
+}
+
+fn scalar_to_list_element<'a>(scalar: &'a Scalar<'_>) -> Fallible<r_ext::ListElement<'a>> {
+    Ok(match scalar {
+        Scalar::Null => r_ext::ListElement::null(),
+        Scalar::Boolean(value) => r_ext::ListElement::logical(*value),
+        Scalar::Integer(value) => match i32::try_from(*value) {
+            Ok(value) => r_ext::ListElement::integer(value),
+            Err(_) => r_ext::ListElement::real(*value as f64),
+        },
+        Scalar::FloatingPoint(value) => r_ext::ListElement::real(value.into_inner()),
+        Scalar::String(value) => return r_ext::ListElement::string(value.as_ref()),
+    })
+}
+
+fn prepare_list_element(
+    node: &mut Yaml,
+    index: usize,
+    length: usize,
+    simplify: bool,
+    handlers: Option<&HandlerRegistry<'_>>,
+    target: &mut Option<OwnedListSexp>,
+) -> Fallible<bool> {
+    resolve_representation(node);
+    if matches!(node, Yaml::Value(_)) {
+        return Ok(true);
+    }
+
+    if target.is_none() {
+        *target = Some(OwnedListSexp::new(length, false)?);
+    }
+    let value = yaml_to_robj(node, simplify, handlers)?;
+    target.as_mut().unwrap().set_value(index, value)?;
+    // The R value is rooted now; retain only a marker for the final batch.
+    *node = Yaml::BadValue;
+    Ok(false)
+}
+
+fn prepared_list_element<'a>(node: &'a Yaml<'_>) -> Fallible<r_ext::ListElement<'a>> {
+    match node {
+        Yaml::Value(scalar) => scalar_to_list_element(scalar),
+        _ => Ok(r_ext::ListElement::skip()),
+    }
+}
+
+fn materialize_node_list(
+    nodes: &mut [Yaml],
+    simplify: bool,
+    handlers: Option<&HandlerRegistry<'_>>,
+) -> Fallible<Sexp> {
+    let length = nodes.len();
+    let mut target = None;
+    let mut has_immediate = false;
+    for (index, node) in nodes.iter_mut().enumerate() {
+        has_immediate |=
+            prepare_list_element(node, index, length, simplify, handlers, &mut target)?;
+    }
+    if !has_immediate {
+        if let Some(target) = target.take() {
+            return Ok(target.into());
+        }
+    }
+    let elements = nodes
+        .iter()
+        .map(prepared_list_element)
+        .collect::<Fallible<Vec<_>>>()?;
+    r_ext::materialize_list(target.as_ref(), &elements, None)
 }
 
 fn sequence_to_robj(
     seq: &mut [Yaml],
     simplify_seqs: bool,
     handlers: Option<&HandlerRegistry<'_>>,
-) -> Fallible<Robj> {
+) -> Fallible<Sexp> {
     #[derive(Copy, Clone, PartialEq, Eq)]
     enum RVectorType {
         List,
@@ -118,17 +168,12 @@ fn sequence_to_robj(
     let mut simplify = simplify_seqs;
 
     if !simplify_seqs {
-        let mut values = Vec::with_capacity(seq.len());
-        for node in seq {
-            resolve_representation(node, simplify_seqs);
-            values.push(yaml_to_robj(node, simplify_seqs, handlers)?);
-        }
-        return Ok(List::from_values(values).into());
+        return materialize_node_list(seq, simplify_seqs, handlers);
     }
 
     // iterate over the vec once to see if we can simplify, fail early/fast if not
     for node in seq.iter_mut() {
-        resolve_representation(node, simplify_seqs);
+        resolve_representation(node);
         match node {
             Yaml::Tagged(_, _) => {
                 simplify = false;
@@ -176,175 +221,212 @@ fn sequence_to_robj(
     if simplify {
         match out_type {
             RVectorType::Logical => {
-                let logicals = Logicals::from_values(seq.iter().map(|node| match node {
-                    Yaml::Value(Scalar::Boolean(b)) => (*b).into(),
-                    Yaml::Value(Scalar::Null) => Rbool::na_value(),
-                    _ => unreachable!("expected only booleans or nulls"),
-                }));
-                return Ok(logicals.into());
+                return simplified_logical_sequence_to_robj(seq);
             }
             RVectorType::Integer => {
-                let integers = Integers::from_values(seq.iter().map(|node| match node {
-                    Yaml::Value(Scalar::Integer(value)) => Rint::from(*value as i32),
-                    Yaml::Value(Scalar::Null) => Rint::na(),
-                    _ => unreachable!("expected only integers or nulls"),
-                }));
-                return Ok(integers.into());
+                return simplified_integer_sequence_to_robj(seq);
             }
             RVectorType::Double => {
-                let doubles = Doubles::from_values(seq.iter().map(|node| match node {
-                    Yaml::Value(Scalar::FloatingPoint(value)) => Rfloat::from(value.into_inner()),
-                    Yaml::Value(Scalar::Integer(value)) => Rfloat::from(*value as f64),
-                    Yaml::Value(Scalar::Null) => Rfloat::na(),
-                    _ => unreachable!("expected only doubles, integers, or nulls"),
-                }));
-                return Ok(doubles.into());
+                return simplified_double_sequence_to_robj(seq);
             }
             RVectorType::Character => {
-                let strings = Strings::from_values(seq.iter().map(|node| match node {
-                    Yaml::Value(Scalar::String(value)) => Rstr::from(value.as_ref()),
-                    Yaml::Value(Scalar::Null) => Rstr::na(),
-                    _ => unreachable!("expected only strings or nulls"),
-                }));
-                return Ok(strings.into());
+                let values: Vec<_> = seq
+                    .iter()
+                    .map(|node| match node {
+                        Yaml::Value(Scalar::String(value)) => r_ext::string_data(value.as_ref()),
+                        Yaml::Value(Scalar::Null) => r_ext::string_data(<&str>::na()),
+                        _ => unreachable!("expected only strings or nulls"),
+                    })
+                    .collect::<Fallible<Vec<_>>>()?;
+                return r_ext::materialize_string_vector(&values);
             }
             RVectorType::List => {}
         }
     }
 
-    // can't simplify via scalar types; try timestamp-aware simplification
-    if TIMESTAMP_SUPPORT_ENABLED {
-        if let Some(out) =
-            simplify_timestamp_sequence(seq, |node| resolve_representation(node, true))?
-        {
-            return Ok(out);
-        }
-    }
-
     // can't simplify, return a list
-    let mut values = Vec::with_capacity(seq.len());
-    for node in seq {
-        values.push(yaml_to_robj(node, simplify_seqs, handlers)?);
-    }
+    materialize_node_list(seq, simplify_seqs, handlers)
+}
 
-    Ok(List::from_values(values).into())
+fn simplified_logical_sequence_to_robj(seq: &[Yaml]) -> Fallible<Sexp> {
+    // SAFETY: `sequence_to_robj()` calls this only after checking this same
+    // sequence contains only booleans and nulls. After allocation succeeds, the
+    // loop writes exactly one initialized value to every slot before return.
+    let out = unsafe {
+        let out = OwnedLogicalSexp::new_without_init(seq.len())?;
+        let slots = std::slice::from_raw_parts_mut(
+            ffi::LOGICAL(out.inner()).cast::<MaybeUninit<i32>>(),
+            seq.len(),
+        );
+        for (slot, node) in slots.iter_mut().zip(seq) {
+            let value = match node {
+                Yaml::Value(Scalar::Boolean(b)) => *b as i32,
+                Yaml::Value(Scalar::Null) => i32::na(),
+                _ => unreachable!("expected only booleans or nulls"),
+            };
+            MaybeUninit::write(slot, value);
+        }
+        out
+    };
+    Ok(out.into())
+}
+
+fn simplified_integer_sequence_to_robj(seq: &[Yaml]) -> Fallible<Sexp> {
+    // SAFETY: `sequence_to_robj()` calls this only after checking this same
+    // sequence contains only i32-representable integers and nulls. After
+    // allocation succeeds, the loop writes every slot before return.
+    let out = unsafe {
+        let out = OwnedIntegerSexp::new_without_init(seq.len())?;
+        let slots = std::slice::from_raw_parts_mut(
+            ffi::INTEGER(out.inner()).cast::<MaybeUninit<i32>>(),
+            seq.len(),
+        );
+        for (slot, node) in slots.iter_mut().zip(seq) {
+            let value = match node {
+                Yaml::Value(Scalar::Integer(value)) => *value as i32,
+                Yaml::Value(Scalar::Null) => i32::na(),
+                _ => unreachable!("expected only integers or nulls"),
+            };
+            MaybeUninit::write(slot, value);
+        }
+        out
+    };
+    Ok(out.into())
+}
+
+fn simplified_double_sequence_to_robj(seq: &[Yaml]) -> Fallible<Sexp> {
+    // SAFETY: `sequence_to_robj()` calls this only after checking this same
+    // sequence contains only doubles, integers, and nulls. After allocation
+    // succeeds, the loop writes every slot before return.
+    let out = unsafe {
+        let out = OwnedRealSexp::new_without_init(seq.len())?;
+        let slots = std::slice::from_raw_parts_mut(
+            ffi::REAL(out.inner()).cast::<MaybeUninit<f64>>(),
+            seq.len(),
+        );
+        for (slot, node) in slots.iter_mut().zip(seq) {
+            let value = match node {
+                Yaml::Value(Scalar::FloatingPoint(value)) => value.into_inner(),
+                Yaml::Value(Scalar::Integer(value)) => *value as f64,
+                Yaml::Value(Scalar::Null) => f64::na(),
+                _ => unreachable!("expected only doubles, integers, or nulls"),
+            };
+            MaybeUninit::write(slot, value);
+        }
+        out
+    };
+    Ok(out.into())
+}
+
+enum PreparedKey<'input> {
+    Yaml(Yaml<'input>),
+    Handled {
+        name: Option<&'static str>,
+        value: PreservedSexp,
+    },
 }
 
 fn mapping_to_robj(
     map: &mut Mapping,
     simplify: bool,
     handlers: Option<&HandlerRegistry<'_>>,
-) -> Fallible<Robj> {
+) -> Fallible<Sexp> {
     let len = map.len();
 
-    if handlers.is_none() {
-        let all_plain_string_keys = map
-            .iter()
-            .all(|(key, _)| matches!(key, Yaml::Value(Scalar::String(_))));
+    let mut entries = Vec::with_capacity(len);
+    let mut value_target = None;
 
-        if all_plain_string_keys {
-            let mut names: Vec<Cow<'_, str>> = Vec::with_capacity(len);
-            let mut values: Vec<Robj> = Vec::with_capacity(len);
-            for (key, mut value) in mem::take(map) {
-                let name = match key {
-                    Yaml::Value(Scalar::String(name)) => name,
-                    _ => unreachable!("checked for only plain string keys"),
-                };
-                names.push(name);
-                values.push(yaml_to_robj(&mut value, simplify, handlers)?);
-            }
-
-            let name_refs: Vec<&str> = names.iter().map(|name| name.as_ref()).collect();
-            let list = List::from_names_and_values(&name_refs, values.into_iter())
-                .map_err(|err| api_other(err.to_string()))?;
-            return Ok(list.into());
-        }
-    }
-
-    let mut values: Vec<Robj> = Vec::with_capacity(len);
-    let mut keys: Vec<Yaml> = Vec::with_capacity(len);
-    let mut key_handler_results: Vec<Option<Robj>> = Vec::with_capacity(len);
-
-    // 1st pass: resolve keys/values while consuming the mapping to avoid cloning keys.
-    for (mut key, mut value) in mem::take(map) {
-        resolve_representation(&mut key, simplify);
+    // Both loaders preserve scalar representations. Resolve keys while consuming
+    // the mapping to avoid cloning them.
+    for (i, (mut key, mut value)) in mem::take(map).into_iter().enumerate() {
+        resolve_representation(&mut key);
 
         // If the key is tagged and a handler exists, apply it to the key itself.
         // Keep the handled value alive so we can borrow its string data when
         // constructing R names without allocating.
-        let key_handler_result = if let (Some(registry), Yaml::Tagged(tag, _)) = (handlers, &key) {
+        let key = if let (Some(registry), Yaml::Tagged(tag, node)) = (handlers, &mut key) {
             if let Some(handler) = registry.get_for_tag(tag.as_ref()) {
-                let key_obj = yaml_to_robj(&mut key, simplify, handlers)?;
-                Some(registry.apply(handler, key_obj)?)
+                let value = yaml_to_robj(node.as_mut(), simplify, handlers)?;
+                let value = PreservedSexp::new(r_ext::call1(handler, value)?);
+                let name = name_if_bare_string(&value.value())?;
+                PreparedKey::Handled { name, value }
             } else {
-                None
+                PreparedKey::Yaml(key)
             }
         } else {
-            None
+            PreparedKey::Yaml(key)
         };
 
-        keys.push(key);
-        key_handler_results.push(key_handler_result);
-        values.push(yaml_to_robj(&mut value, simplify, handlers)?);
+        prepare_list_element(&mut value, i, len, simplify, handlers, &mut value_target)?;
+        entries.push((key, value));
     }
 
-    // 2nd pass: build names as &str from keys.
+    // 2nd pass: build names and list elements together.
     // String mapping keys should contribute regular R names. `needs_yaml_keys_attr`
     // tracks whether we must attach the `yaml_keys` attribute because at least
     // one key cannot be represented purely by R names: either a non-string key,
     // or a string key carrying a non-canonical (informative) tag. Canonical
     // core string tags are treated as "no information" for this purpose.
     let mut needs_yaml_keys_attr = false;
-    let mut names: Vec<&str> = Vec::with_capacity(len);
-    for (key, key_handler_result) in keys.iter().zip(key_handler_results.iter()) {
-        if let Some(handled) = key_handler_result {
-            if let Some(name_from_handler) = name_if_bare_string(handled) {
-                names.push(name_from_handler);
-            } else {
+    let mut names = Vec::with_capacity(len);
+    let mut elements = Vec::with_capacity(len);
+    for (key, value) in &entries {
+        match key {
+            PreparedKey::Handled {
+                name: Some(name), ..
+            } => names.push(r_ext::string_data(name)?),
+            PreparedKey::Yaml(Yaml::Value(Scalar::String(name))) => {
+                names.push(r_ext::string_data(name.as_ref())?);
+            }
+            _ => {
+                names.push(r_ext::string_data("")?);
                 needs_yaml_keys_attr = true;
-                names.push("");
-            }
-        } else {
-            match key {
-                Yaml::Value(Scalar::String(string_key)) => {
-                    // Plain string key: representable as an R name with no extra metadata.
-                    names.push(string_key.as_ref());
-                }
-                _ => {
-                    // Tagged or non-string keys get tracked in `yaml_keys`. Core string tags are
-                    // normalized to plain strings by `resolve_representation`, so any tagged key
-                    // reaching here carries extra information.
-                    needs_yaml_keys_attr = true;
-                    names.push("");
-                }
             }
         }
+        elements.push(prepared_list_element(value)?);
+    }
+    if needs_yaml_keys_attr && value_target.is_none() {
+        value_target = Some(OwnedListSexp::new(len, false)?);
+    }
+    let list = r_ext::materialize_list(value_target.as_ref(), &elements, Some(&names))?;
+
+    if !needs_yaml_keys_attr {
+        return Ok(list);
     }
 
-    let mut list = List::from_names_and_values(&names, values.into_iter())
-        .map_err(|err| api_other(err.to_string()))?;
+    drop(elements);
+    drop(names);
 
-    if needs_yaml_keys_attr {
-        let mut yaml_keys = Vec::with_capacity(keys.len());
-        for (mut key, handled_value) in keys.into_iter().zip(key_handler_results) {
-            if let Some(val) = handled_value {
-                yaml_keys.push(val);
-            } else {
-                yaml_keys.push(yaml_to_robj(&mut key, simplify, handlers)?);
+    let mut keys_target = Some(OwnedListSexp::new(len, false)?);
+    let mut key_elements = Vec::with_capacity(len);
+    for (i, (key, _)) in entries.iter_mut().enumerate() {
+        let element = match key {
+            PreparedKey::Handled {
+                name: Some(name), ..
+            } => r_ext::ListElement::string(name)?,
+            PreparedKey::Handled { value, .. } => {
+                keys_target.as_mut().unwrap().set_value(i, value.value())?;
+                r_ext::ListElement::skip()
             }
-        }
-        let yaml_keys = List::from_values(yaml_keys);
-        list.set_attrib(sym_yaml_keys(), yaml_keys)
-            .map_err(|err| api_other(err.to_string()))?;
+            PreparedKey::Yaml(key) => {
+                prepare_list_element(key, i, len, simplify, handlers, &mut keys_target)?;
+                prepared_list_element(key)?
+            }
+        };
+        key_elements.push(element);
     }
 
-    Ok(list.into())
+    let yaml_keys = r_ext::materialize_list(keys_target.as_ref(), &key_elements, None)?;
+    let mut list = list;
+    r_ext::set_attrib_sym(&mut list, r_ext::sym_yaml_keys(), yaml_keys)?;
+    Ok(list)
 }
 
-fn name_if_bare_string(robj: &Robj) -> Option<&str> {
-    let name = robj.as_str()?;
-    let attributes = call!("attributes", robj.clone()).ok()?;
-    attributes.is_null().then_some(name)
+fn name_if_bare_string(robj: &Sexp) -> Fallible<Option<&'static str>> {
+    let Some(name) = r_ext::as_string_scalar(robj)? else {
+        return Ok(None);
+    };
+    Ok((!r_ext::has_attributes(robj)).then_some(name))
 }
 
 fn convert_tagged(
@@ -352,47 +434,32 @@ fn convert_tagged(
     node: &mut Yaml,
     simplify: bool,
     handlers: Option<&HandlerRegistry<'_>>,
-) -> Fallible<Robj> {
+) -> Fallible<Sexp> {
     if let Some(registry) = handlers {
         if let Some(handler) = registry.get_for_tag(tag) {
             let value = yaml_to_robj(node, simplify, handlers)?;
-            return registry.apply(handler, value);
-        }
-    }
-
-    if TIMESTAMP_SUPPORT_ENABLED && is_timestamp_tag(tag) {
-        let keep_empty_tzone = tag.handle.as_str() == "!";
-        let preserve_tzone = true;
-        if let Some(timestamp) = parse_timestamp_node(node, preserve_tzone, keep_empty_tzone)? {
-            return Ok(timestamp);
+            return r_ext::call1(handler, value);
         }
     }
 
     let value = yaml_to_robj(node, simplify, handlers)?;
-    if tag.is_yaml_core_schema() {
-        return match tag.suffix.as_str() {
-            "str" | "null" | "bool" | "int" | "float" | "seq" | "map" => Ok(value),
-            "timestamp" | "set" | "omap" | "pairs" | "binary" => set_yaml_tag_attr(value, tag),
-            other => Err(api_other(format!(
-                "Unsupported core-schema tag `{handle}{other}`",
-                handle = tag.handle
-            ))),
-        };
+    if tag.is_yaml_core_schema()
+        && matches!(
+            tag.suffix.as_str(),
+            "str" | "null" | "bool" | "int" | "float" | "seq" | "map"
+        )
+    {
+        return Ok(value);
     }
 
     set_yaml_tag_attr(value, tag)
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn is_core_string_tag(tag: &Tag) -> bool {
-    tag.is_yaml_core_schema() && tag.suffix.as_str() == "str"
 }
 
 fn is_core_null_tag(tag: &Tag) -> bool {
     tag.is_yaml_core_schema() && tag.suffix.as_str() == "null"
 }
 
-fn set_yaml_tag_attr(mut value: Robj, tag: &Tag) -> Fallible<Robj> {
+fn set_yaml_tag_attr(value: Sexp, tag: &Tag) -> Fallible<Sexp> {
     let mut rendered_tag = String::with_capacity(tag.handle.len() + tag.suffix.len());
     rendered_tag.push_str(tag.handle.as_str());
     rendered_tag.push_str(tag.suffix.as_str());
@@ -411,14 +478,17 @@ fn set_yaml_tag_attr(mut value: Robj, tag: &Tag) -> Fallible<Robj> {
         return Ok(value);
     }
 
-    value.set_attrib(sym_yaml_tag(), rendered_tag.as_str())?;
+    let value_guard = PreservedSexp::new(value);
+    let tag_value = PreservedSexp::new(r_ext::string_scalar(rendered_tag.as_str())?);
+    let mut value = value_guard.value();
+    r_ext::set_attrib_sym(&mut value, r_ext::sym_yaml_tag(), tag_value.value())?;
     Ok(value)
 }
 
-fn wrap_unsupported(err: EvalError) -> EvalError {
+fn wrap_unsupported(err: savvy::Error) -> savvy::Error {
     match err {
-        EvalError::Api(inner) => EvalError::Api(Error::Other(format!("Unsupported YAML: {inner}"))),
-        EvalError::Jump(token) => EvalError::Jump(token),
+        savvy::Error::Aborted(token) => savvy::Error::Aborted(token),
+        other => api_other(format!("Unsupported YAML: {other}")),
     }
 }
 
@@ -433,22 +503,22 @@ fn load_yaml_documents<'input>(text: &'input str, multi: bool) -> Fallible<Vec<Y
 }
 
 pub(crate) fn parse_yaml_impl(
-    text: Strings,
+    text: StringSexp,
     multi: bool,
     simplify: bool,
-    handlers: Robj,
-) -> Fallible<Robj> {
+    handlers: Sexp,
+) -> Fallible<Sexp> {
     let handler_registry = HandlerRegistry::from_robj(&handlers)?;
     let handlers = handler_registry.as_ref();
 
     match text.len() {
-        0 => Ok(NULL.into()),
+        0 => Ok(r_ext::null()),
         1 => {
-            let first = text.elt(0);
+            let first = r_ext::string_elt(&text, 0)?;
             if first.is_na() {
                 return Err(api_other("`text` must not contain NA strings"));
             }
-            let docs = load_yaml_documents(first.as_ref(), multi)?;
+            let docs = load_yaml_documents(first, multi)?;
             docs_to_robj(docs, multi, simplify, handlers)
         }
         _ => {
@@ -464,55 +534,56 @@ fn docs_to_robj(
     multi: bool,
     simplify: bool,
     handlers: Option<&HandlerRegistry<'_>>,
-) -> Fallible<Robj> {
+) -> Fallible<Sexp> {
     if multi {
-        let mut values = Vec::with_capacity(docs.len());
-        for doc in docs.iter_mut() {
-            values.push(yaml_to_robj(doc, simplify, handlers).map_err(wrap_unsupported)?);
-        }
-        Ok(List::from_values(values).into())
+        materialize_node_list(&mut docs, simplify, handlers).map_err(wrap_unsupported)
     } else {
         match docs.first_mut() {
             Some(doc) => yaml_to_robj(doc, simplify, handlers).map_err(wrap_unsupported),
-            None => Ok(NULL.into()),
+            None => Ok(r_ext::null()),
         }
     }
 }
 
-fn joined_lines_iter<'a>(text: &'a Strings) -> Fallible<JoinedLinesIter<'a>> {
-    for line in text.iter() {
+fn joined_lines_iter(text: &StringSexp) -> Fallible<JoinedLinesIter> {
+    let mut lines = Vec::with_capacity(text.len());
+    for i in 0..text.len() {
+        let line = r_ext::string_elt(text, i)?;
         if line.is_na() {
             return Err(api_other("`text` must not contain NA strings"));
         }
+        lines.push(line);
     }
-    Ok(JoinedLinesIter::new(text.as_slice().iter()))
+    Ok(JoinedLinesIter::new(lines))
 }
 
-type LinesIter<'a> = std::slice::Iter<'a, Rstr>;
-
-struct JoinedLinesIter<'a> {
-    lines: LinesIter<'a>,
-    current: std::str::Chars<'a>,
+struct JoinedLinesIter {
+    lines: Vec<&'static str>,
+    index: usize,
+    current: std::str::Chars<'static>,
 }
 
-impl<'a> JoinedLinesIter<'a> {
-    fn new(mut lines: LinesIter<'a>) -> Self {
-        let current = lines
-            .next()
-            .map_or_else(|| "".chars(), |line| line.as_ref().chars());
-        Self { lines, current }
+impl JoinedLinesIter {
+    fn new(lines: Vec<&'static str>) -> Self {
+        let current = lines.first().copied().unwrap_or("").chars();
+        Self {
+            lines,
+            index: 1,
+            current,
+        }
     }
 }
 
-impl<'a> Iterator for JoinedLinesIter<'a> {
+impl Iterator for JoinedLinesIter {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(ch) = self.current.next() {
             return Some(ch);
         }
-        if let Some(next_line) = self.lines.next() {
-            self.current = next_line.as_ref().chars();
+        if self.index < self.lines.len() {
+            self.current = self.lines[self.index].chars();
+            self.index += 1;
             return Some('\n');
         }
         None
@@ -528,7 +599,7 @@ where
     loader.early_parse(false);
     parser
         .load(&mut loader, multi)
-        .map_err(|err| Error::Other(format!("YAML parse error: {err}")))?;
+        .map_err(|err| api_other(format!("YAML parse error: {err}")))?;
     Ok(loader.into_documents())
 }
 
@@ -536,8 +607,8 @@ pub(crate) fn read_yaml_impl(
     path: &str,
     multi: bool,
     simplify: bool,
-    handlers: Robj,
-) -> Fallible<Robj> {
+    handlers: Sexp,
+) -> Fallible<Sexp> {
     let handler_registry = HandlerRegistry::from_robj(&handlers)?;
     let handlers = handler_registry.as_ref();
 
@@ -545,119 +616,4 @@ pub(crate) fn read_yaml_impl(
         .map_err(|err| api_other(format!("Failed to read `{path}`: {err}")))?;
     let docs = load_yaml_documents(&contents, multi)?;
     docs_to_robj(docs, multi, simplify, handlers)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use saphyr::{LoadableYamlNode, Scalar as YamlScalar};
-
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-    enum ParsedValueKind {
-        String,
-        Boolean,
-    }
-
-    fn load_scalar(input: &str) -> Yaml<'_> {
-        let mut docs = Yaml::load_from_str(input).expect("parser should load tagged scalar");
-        docs.pop().expect("expected one document")
-    }
-
-    fn normalized_suffix(suffix: &str) -> &str {
-        let suffix = suffix.trim_start_matches('!');
-        suffix.strip_prefix("tag:yaml.org,2002:").unwrap_or(suffix)
-    }
-
-    #[test]
-    fn canonical_string_tags_cover_all_forms() {
-        let canonical_string = Tag {
-            handle: "tag:yaml.org,2002:".to_string(),
-            suffix: "str".to_string(),
-        };
-        assert!(is_core_string_tag(&canonical_string));
-
-        let cases = [
-            ("!!str true", ParsedValueKind::String),
-            ("!str true", ParsedValueKind::Boolean),
-            ("!<str> true", ParsedValueKind::Boolean),
-            ("!<!str> true", ParsedValueKind::Boolean),
-            ("!<!!str> true", ParsedValueKind::Boolean),
-            ("!<tag:yaml.org,2002:str> true", ParsedValueKind::Boolean),
-        ];
-
-        for (input, expected_value) in cases {
-            let parsed = load_scalar(input);
-            match parsed {
-                Yaml::Value(YamlScalar::String(value)) => {
-                    assert_eq!(
-                        expected_value,
-                        ParsedValueKind::String,
-                        "input `{input}` should resolve to string value"
-                    );
-                    assert_eq!(value.as_ref(), "true");
-                }
-                Yaml::Tagged(tag, inner) => {
-                    assert_eq!(
-                        is_core_string_tag(&tag),
-                        tag.is_yaml_core_schema()
-                            && normalized_suffix(tag.suffix.as_str()) == "str",
-                        "input `{input}` canonical detection should match core `str` suffix",
-                    );
-                    match (expected_value, inner.as_ref()) {
-                        (ParsedValueKind::Boolean, Yaml::Value(YamlScalar::Boolean(value))) => {
-                            assert!(
-                                *value,
-                                "input `{input}` should parse to boolean `true` when not core"
-                            );
-                        }
-                        (expected, other) => {
-                            panic!(
-                                "input `{input}` expected value kind {expected:?}, got {other:?}"
-                            )
-                        }
-                    }
-                }
-                other => panic!("input `{input}` expected tagged or string value, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn canonical_null_tags_cover_all_forms() {
-        let canonical_null = Tag {
-            handle: "tag:yaml.org,2002:".to_string(),
-            suffix: "null".to_string(),
-        };
-        assert!(is_core_null_tag(&canonical_null));
-
-        let cases = [
-            "!!null null",
-            "!<null> null",
-            "!<!null> null",
-            "!<!!null> null",
-            "!<tag:yaml.org,2002:null> null",
-        ];
-
-        for input in cases {
-            let parsed = load_scalar(input);
-            match parsed {
-                Yaml::Value(YamlScalar::Null) => {
-                    // Canonical null scalars should not carry tags.
-                }
-                Yaml::Tagged(tag, inner) => {
-                    assert_eq!(
-                        is_core_null_tag(&tag),
-                        tag.is_yaml_core_schema()
-                            && normalized_suffix(tag.suffix.as_str()) == "null",
-                        "input `{input}` canonical detection should match core `null` suffix",
-                    );
-                    assert!(
-                        matches!(inner.as_ref(), Yaml::Value(YamlScalar::Null)),
-                        "input `{input}` should parse to tagged null scalar"
-                    );
-                }
-                other => panic!("input `{input}` expected null scalar, got {other:?}"),
-            }
-        }
-    }
 }

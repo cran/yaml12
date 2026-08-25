@@ -385,7 +385,8 @@ nodes.</p>
 <span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="co">#&gt; [1] 2</span></span></code></pre></div>
 <p>Any errors from a handler stop parsing:</p>
 <div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">parse_yaml</span>(<span class="st">&quot;!expr stop(&#39;boom&#39;)&quot;</span>, <span class="at">handlers =</span> handlers)</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="co">#&gt; Error in eval(str2lang(x), globalenv()): boom</span></span></code></pre></div>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="co">#&gt; Error:</span></span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="co">#&gt; ! boom</span></span></code></pre></div>
 <p>Any tag without a matching handler is left preserved as
 <code>yaml_tag</code> attribute, and handlers without matching tags are
 left unused.</p>
@@ -593,20 +594,18 @@ stream are returned.</p>
 <code>FALSE</code>, producing a single YAML document. When
 <code>multi = TRUE</code>, the provided R object is treated as a list of
 documents and written as a YAML document stream, with documents
-separated by the start marker <code>---</code>. Regardless of
-<code>multi</code>, <code>write_yaml()</code> always includes an initial
-start marker and a final end marker.</p>
+separated by the start marker <code>---</code>.
+<code>write_yaml()</code> starts every document with this marker and
+does not add the optional end marker.</p>
 <div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a><span class="fu">write_yaml</span>(<span class="fu">list</span>(<span class="st">&quot;foo&quot;</span>, <span class="st">&quot;bar&quot;</span>))</span>
 <span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
 <span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a><span class="co">#&gt; - foo</span></span>
 <span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a><span class="co">#&gt; - bar</span></span>
-<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a><span class="co">#&gt; ...</span></span>
-<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a><span class="fu">write_yaml</span>(<span class="fu">list</span>(<span class="st">&quot;foo&quot;</span>, <span class="st">&quot;bar&quot;</span>), <span class="at">multi =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
-<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a><span class="co">#&gt; foo</span></span>
-<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
-<span id="cb16-10"><a href="#cb16-10" tabindex="-1"></a><span class="co">#&gt; bar</span></span>
-<span id="cb16-11"><a href="#cb16-11" tabindex="-1"></a><span class="co">#&gt; ...</span></span></code></pre></div>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a><span class="fu">write_yaml</span>(<span class="fu">list</span>(<span class="st">&quot;foo&quot;</span>, <span class="st">&quot;bar&quot;</span>), <span class="at">multi =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a><span class="co">#&gt; foo</span></span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
+<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a><span class="co">#&gt; bar</span></span></code></pre></div>
 <p>When <code>multi = FALSE</code>, parsing stops after the first
 document—even if later content is not valid YAML. That makes it easy to
 extract front matter from files that mix YAML with other text (like R
@@ -639,8 +638,7 @@ calling <code>format_yaml()</code> or <code>write_yaml()</code>.</p>
 <div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a>tagged <span class="ot">&lt;-</span> <span class="fu">structure</span>(<span class="st">&quot;1 + x&quot;</span>, <span class="at">yaml_tag =</span> <span class="st">&quot;!expr&quot;</span>)</span>
 <span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a><span class="fu">write_yaml</span>(tagged)</span>
 <span id="cb18-3"><a href="#cb18-3" tabindex="-1"></a><span class="co">#&gt; ---</span></span>
-<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a><span class="co">#&gt; !expr 1 + x</span></span>
-<span id="cb18-5"><a href="#cb18-5" tabindex="-1"></a><span class="co">#&gt; ...</span></span></code></pre></div>
+<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a><span class="co">#&gt; !expr 1 + x</span></span></code></pre></div>
 </div>
 <div id="anchors" class="section level2">
 <h2>Anchors</h2>

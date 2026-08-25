@@ -98,7 +98,7 @@ beta: true
   expect_identical(parsed$beta, TRUE)
 })
 
-test_that("timestamp tags keep yaml_tag when timestamp support is disabled", {
+test_that("parse_yaml preserves unsupported timestamp tags", {
   yaml <- "
 - !!timestamp 2025-01-01
 - !!timestamp 2025-01-01 21:59:43.10 -5
@@ -106,13 +106,18 @@ test_that("timestamp tags keep yaml_tag when timestamp support is disabled", {
   parsed <- parse_yaml(yaml)
   expect_length(parsed, 2)
 
+  expect_type(parsed[[1]], "character")
   expect_identical(as.character(parsed[[1]]), "2025-01-01")
   expect_identical(
     attr(parsed[[1]], "yaml_tag", exact = TRUE),
     "tag:yaml.org,2002:timestamp"
   )
 
-  expect_identical(as.character(parsed[[2]]), "2025-01-01 21:59:43.10 -5")
+  expect_type(parsed[[2]], "character")
+  expect_identical(
+    as.character(parsed[[2]]),
+    "2025-01-01 21:59:43.10 -5"
+  )
   expect_identical(
     attr(parsed[[2]], "yaml_tag", exact = TRUE),
     "tag:yaml.org,2002:timestamp"
@@ -161,6 +166,40 @@ test_that("parse_yaml errors on NA strings regardless of position or length", {
   expect_snapshot(
     error = TRUE,
     parse_yaml(c("foo: 1", "bar: 2", NA_character_))
+  )
+})
+
+test_that("parse_yaml accepts latin1 encoded input strings", {
+  latin1 <- rawToChar(as.raw(0xe9))
+  Encoding(latin1) <- "latin1"
+
+  expect_identical(parse_yaml(latin1), "\u00e9")
+})
+
+test_that("parse_yaml honors latin1 marks on valid UTF-8 bytes", {
+  latin1 <- rawToChar(as.raw(c(0xc3, 0xa9)))
+  Encoding(latin1) <- "latin1"
+
+  expect_identical(parse_yaml(latin1), "\u00c3\u00a9")
+
+  latin1_line <- rawToChar(as.raw(c(0x2d, 0x20, 0xc3, 0xa9)))
+  Encoding(latin1_line) <- "latin1"
+  expect_identical(
+    parse_yaml(c(latin1_line, latin1_line)),
+    c("\u00c3\u00a9", "\u00c3\u00a9")
+  )
+})
+
+test_that("parse_yaml rejects malformed strings marked as UTF-8", {
+  invalid <- rawToChar(as.raw(0xff))
+  Encoding(invalid) <- "UTF-8"
+  expect_identical(Encoding(invalid), "UTF-8")
+  expect_false(validUTF8(invalid))
+
+  expect_error(
+    parse_yaml(invalid),
+    "R UTF-8 string contains invalid UTF-8",
+    fixed = TRUE
   )
 })
 
@@ -222,47 +261,63 @@ test_that("parse_yaml preserves YAML tags", {
   expect_identical(tagged$values, structure(c(1L, 2L), yaml_tag = "!seq"))
 })
 
+test_that("parse_yaml preserves YAML tags under GC pressure", {
+  expected <- structure("value", yaml_tag = "!custom")
+  ok <- TRUE
 
-if (FALSE) {
-  test_that("parse_yaml parses YAML 1.1 timestamp forms", {
-    canonical <- parse_yaml("!!timestamp 2001-12-15T02:59:43.1Z")
-    expect_s3_class(canonical, "POSIXct")
-    expect_identical(attr(canonical, "tzone"), "UTC")
-    expect_equal(
-      as.numeric(canonical),
-      as.numeric(as.POSIXct("2001-12-15 02:59:43.1", tz = "UTC"))
-    )
+  gctorture(TRUE)
+  on.exit(gctorture(FALSE), add = TRUE)
 
-    expect_equal(
-      as.numeric(parse_yaml("!!timestamp 2001-12-14t21:59:43.10-05:00")),
-      as.numeric(canonical)
-    )
-    expect_identical(
-      attr(parse_yaml("!!timestamp 2001-12-14t21:59:43.10-05:00"), "tzone"),
-      "Etc/GMT+5"
-    )
-    expect_equal(
-      as.numeric(parse_yaml("!!timestamp 2001-12-14 21:59:43.10 -5")),
-      as.numeric(canonical)
-    )
-    expect_null(attr(
-      parse_yaml("!!timestamp 2001-12-14 21:59:43.10 -5"),
-      "tzone"
-    ))
-    expect_equal(
-      as.numeric(parse_yaml("!!timestamp 2001-12-15 2:59:43.10")),
-      as.numeric(canonical)
-    )
+  for (i in seq_len(50)) {
+    ok <- identical(parse_yaml(r"--(!custom value)--"), expected)
+    if (!ok) {
+      break
+    }
+  }
 
-    date_only <- parse_yaml("!!timestamp 2002-12-14")
-    expect_s3_class(date_only, "Date")
-    expect_identical(as.integer(date_only), as.integer(as.Date("2002-12-14")))
+  gctorture(FALSE)
+  expect_true(ok)
+})
 
-    no_tz <- parse_yaml("!!timestamp 2001-12-15 02:59:43")
-    expect_s3_class(no_tz, "POSIXct")
-    expect_null(attr(no_tz, "tzone", exact = TRUE))
-  })
-}
+test_that("parse_yaml preserves mixed unsimplified containers under GC pressure", {
+  yaml <- r"--(
+integer: 1
+logical: true
+nothing: null
+text: value
+sequence: [false, 2, 3.5, null, item]
+nested:
+  tagged: !custom tagged
+  handled: !wrap handled
+)--"
+  handlers <- list(
+    "!wrap" = function(value) {
+      structure(list(value = value), class = "wrapped")
+    }
+  )
+  expected <- list(
+    integer = 1L,
+    logical = TRUE,
+    nothing = NULL,
+    text = "value",
+    sequence = list(FALSE, 2L, 3.5, NULL, "item"),
+    nested = list(
+      tagged = structure("tagged", yaml_tag = "!custom"),
+      handled = structure(list(value = "handled"), class = "wrapped")
+    )
+  )
+
+  gctorture(TRUE)
+  on.exit(gctorture(FALSE), add = TRUE)
+
+  parsed <- parse_yaml(yaml, simplify = FALSE, handlers = handlers)
+  strings <- parse_yaml("[alpha, beta, null]")
+
+  gctorture(FALSE)
+  expect_identical(parsed, expected)
+  expect_identical(strings, c("alpha", "beta", NA_character_))
+})
+
 test_that("parse_yaml applies handlers to tagged nodes", {
   handlers <- list(
     "!expr" = function(x) eval(str2lang(x), baseenv()),
@@ -287,6 +342,39 @@ test_that("parse_yaml applies handlers to tagged mapping keys", {
 
   result <- parse_yaml("!upper key: value", handlers = handlers)
   expect_identical(result, list(KEY = "value"))
+})
+
+test_that("parse_yaml applies mapping key handlers once", {
+  calls <- 0L
+  handlers <- list(
+    "!suffix" = function(x) {
+      calls <<- calls + 1L
+      paste0(x, "!")
+    }
+  )
+
+  result <- parse_yaml("!suffix key: value", handlers = handlers)
+  expect_identical(result, list("key!" = "value"))
+  expect_identical(calls, 1L)
+})
+
+test_that("parse_yaml keeps handled string keys in yaml_keys when needed", {
+  handlers <- list(
+    "!upper" = function(x) toupper(x)
+  )
+  yaml <- r"--(
+!upper key: value
+1: one
+)--"
+
+  result <- parse_yaml(yaml, handlers = handlers)
+
+  expected <- structure(
+    list("value", "one"),
+    names = c("KEY", ""),
+    yaml_keys = list("KEY", 1L)
+  )
+  expect_identical(result, expected)
 })
 
 test_that("parse_yaml leaves names empty when key handler returns non-string", {
@@ -440,6 +528,34 @@ test_that("parse_yaml errors clearly on invalid canonical tags", {
   expect_snapshot(error = TRUE, parse_yaml("!!null foo"))
 })
 
+test_that("parse_yaml preserves unknown core tags", {
+  collection <- parse_yaml(
+    "!!python/object:__main__.DangerousPayload {payload: true}"
+  )
+  expect_identical(
+    collection,
+    structure(
+      list(payload = TRUE),
+      yaml_tag = "tag:yaml.org,2002:python/object:__main__.DangerousPayload"
+    )
+  )
+  collection_yaml <- format_yaml(collection)
+  expect_true(startsWith(
+    collection_yaml,
+    "!!python/object:__main__.DangerousPayload"
+  ))
+  expect_identical(parse_yaml(collection_yaml), collection)
+
+  scalar <- parse_yaml('!!unknown "true"')
+  expect_identical(
+    scalar,
+    structure("true", yaml_tag = "tag:yaml.org,2002:unknown")
+  )
+  scalar_yaml <- format_yaml(scalar)
+  expect_true(startsWith(scalar_yaml, "!!unknown"))
+  expect_identical(parse_yaml(scalar_yaml), scalar)
+})
+
 test_that("parse_yaml renders non-string mapping keys", {
   yaml <- r"--(
 1: a
@@ -527,6 +643,18 @@ test_that("parse_yaml preserves non-core tags on mapping keys via yaml_keys", {
 
   expect_snapshot(str(parse_yaml("!custom foo: 1\n", simplify = TRUE)))
   expect_snapshot(str(parse_yaml("!custom foo: 1\n", simplify = FALSE)))
+})
+
+test_that("parse_yaml round-trips verbatim tags on mapping keys", {
+  parsed <- parse_yaml("!<foo> key: value", simplify = FALSE)
+  expected <- structure(
+    list("value"),
+    names = "",
+    yaml_keys = list(structure("key", yaml_tag = "foo"))
+  )
+
+  expect_identical(parsed, expected)
+  expect_identical(parse_yaml(format_yaml(parsed), simplify = FALSE), parsed)
 })
 
 test_that("parse_yaml does not set yaml_keys when all mapping keys are strings", {
